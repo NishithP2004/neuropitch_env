@@ -60,9 +60,9 @@ The UI shows **simulation and training in one place**: product brief, compliance
 
 *(NeuroPitch environment and training dashboard)*
 
-![NeuroPitch UI Screenshot 1](https://github.com/user-attachments/assets/5041a16b-a6c2-45ae-a890-04d4b2f4bb5b)
+![NeuroPitch UI Screenshot 1](https://cdn-uploads.huggingface.co/production/uploads/65283a84ff28c6df020f5429/XvDo_P1yZGyPSmzq9Hk2u.png)
 
-![NeuroPitch UI Screenshot 2](https://github.com/user-attachments/assets/800929c1-75fb-4249-8275-153fc6d92f84)
+![NeuroPitch UI Screenshot 2](https://cdn-uploads.huggingface.co/production/uploads/65283a84ff28c6df020f5429/RufhxfeRUq7LttrtEyUyr.png)
 
 ---
 
