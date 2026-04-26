@@ -61,8 +61,12 @@ class ComplianceResult:
     violations: list[str]
 
 
+import logging as _logging
+_compliance_log = _logging.getLogger(__name__)
+
+
 class ComplianceDirector:
-    """OpenAI-based compliance checker with search-augmented evidence."""
+    """OpenAI-based compliance checker with optional Tavily search evidence."""
 
     def __init__(self, api_key: str, tavily_api_key: str, model: str):
         self._client = OpenAI(api_key=api_key)
@@ -70,20 +74,35 @@ class ComplianceDirector:
         self._model = model
 
     def _web_search(self, query: str) -> str:
-        response = requests.post(
-            "https://api.tavily.com/search",
-            json={"api_key": self._tavily_key, "query": query, "max_results": 5},
-            timeout=20,
-        )
-        response.raise_for_status()
-        data = response.json()
-        snippets = []
-        for item in data.get("results", []):
-            title = item.get("title", "")
-            content = item.get("content", "")
-            url = item.get("url", "")
-            snippets.append(f"- {title} ({url}): {content}")
-        return "\n".join(snippets) if snippets else "No evidence returned by search."
+        """Return Tavily search snippets, or a fallback string on any failure.
+
+        Tavily errors (bad key, quota, 4xx/5xx, timeout) must NOT propagate —
+        the compliance check can still run without external evidence; it just
+        relies on the model's own knowledge instead.
+        """
+        if not self._tavily_key:
+            return "Web evidence unavailable (TAVILY_API_KEY not configured)."
+        try:
+            response = requests.post(
+                "https://api.tavily.com/search",
+                json={"api_key": self._tavily_key, "query": query, "max_results": 5},
+                timeout=20,
+            )
+            response.raise_for_status()
+            data = response.json()
+            snippets = []
+            for item in data.get("results", []):
+                title = item.get("title", "")
+                content = item.get("content", "")
+                url = item.get("url", "")
+                snippets.append(f"- {title} ({url}): {content}")
+            return "\n".join(snippets) if snippets else "No evidence returned by search."
+        except requests.HTTPError as exc:
+            _compliance_log.warning("Tavily HTTP error (%s); proceeding without web evidence.", exc)
+            return f"Web search unavailable ({exc}); evaluate based on known advertising standards."
+        except Exception as exc:
+            _compliance_log.warning("Tavily request failed (%s); proceeding without web evidence.", exc)
+            return "Web search unavailable; evaluate based on known advertising standards."
 
     def evaluate(self, product_brief: str, pitch_text: str) -> ComplianceResult:
         evidence = self._web_search(
