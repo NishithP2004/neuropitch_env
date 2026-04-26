@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -23,6 +25,8 @@ from openai import OpenAI
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 from tribev2.demo_utils import TribeModel
+
+_env_log = logging.getLogger(__name__)
 
 try:
     from ..models import NeuropitchAction, NeuropitchObservation
@@ -197,12 +201,33 @@ class OllamaFocusGroup:
         vote = "BUY" if "BUY" in text else "PASS"
         return persona, vote
 
+    # Per-persona vote timeout (seconds). Slow Ollama models default to PASS
+    # rather than blocking the full step indefinitely.
+    _VOTE_TIMEOUT_S: int = 60
+
     def vote(self, pitch: str) -> dict[str, str]:
-        results = [
-            self._vote_once(persona, model_name, pitch)
-            for persona, (model_name, _) in PERSONA_MODEL_MAP.items()
-        ]
-        return {persona: vote for persona, vote in results}
+        """Run all persona votes in parallel; each has its own timeout."""
+        results: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=len(PERSONA_MODEL_MAP)) as pool:
+            future_to_persona = {
+                pool.submit(self._vote_once, persona, model_name, pitch): persona
+                for persona, (model_name, _) in PERSONA_MODEL_MAP.items()
+            }
+            for future in as_completed(future_to_persona, timeout=self._VOTE_TIMEOUT_S + 5):
+                persona = future_to_persona[future]
+                try:
+                    _, vote = future.result(timeout=self._VOTE_TIMEOUT_S)
+                    results[persona] = vote
+                except FuturesTimeoutError:
+                    _env_log.warning("Vote timeout for persona '%s' — defaulting to PASS", persona)
+                    results[persona] = "PASS"
+                except Exception as exc:
+                    _env_log.warning("Vote error for persona '%s': %s — defaulting to PASS", persona, exc)
+                    results[persona] = "PASS"
+        # Fill in any personas that didn't get a result (e.g. as_completed timeout)
+        for persona in PERSONA_MODEL_MAP:
+            results.setdefault(persona, "PASS")
+        return results
 
     def _available_model_names(self) -> set[str]:
         models_resp = self._client.list()
@@ -267,6 +292,9 @@ class TribeNeuromarketer:
                 f"TRIBE audio anchor not found at '{self._anchor_audio_path}'."
             )
         self._model = TribeModel.from_pretrained(model_id, cache_folder=Path(cache_folder))
+        # Cache anchor-audio predictions: reference.wav never changes across episodes,
+        # so we pay the whisperx + TRIBE cost once at startup and reuse the result.
+        self._anchor_preds_cache: np.ndarray | None = None
 
     def _region_score(self, preds: np.ndarray, region: str) -> float:
         start, end = self._REGION_VERTEX_SLICES[region]
@@ -288,9 +316,15 @@ class TribeNeuromarketer:
         return preds
 
     def _predict_from_anchor_audio(self) -> np.ndarray:
-        events = self._model.get_events_dataframe(audio_path=self._anchor_audio_path)
-        preds, _ = self._model.predict(events=events, verbose=False)
-        return preds
+        if self._anchor_preds_cache is None:
+            events = self._model.get_events_dataframe(audio_path=self._anchor_audio_path)
+            preds, _ = self._model.predict(events=events, verbose=False)
+            self._anchor_preds_cache = preds
+        return self._anchor_preds_cache
+
+    def warmup(self) -> None:
+        """Pre-compute anchor audio predictions so the first real step isn't slow."""
+        _ = self._predict_from_anchor_audio()
 
     def get_biological_reward(self, ad_copy: str) -> dict[str, float]:
         text_preds = self._predict_from_text(ad_copy)
@@ -319,6 +353,7 @@ class RuntimeServices:
 
 
 _RUNTIME: RuntimeServices | None = None
+_RUNTIME_READY: bool = False   # True once TRIBE warmup completes
 
 
 def _required_env(name: str) -> str:
@@ -346,6 +381,7 @@ def _resolve_anchor_audio_path() -> str:
 
 
 def _init_runtime() -> RuntimeServices:
+    global _RUNTIME_READY
     compliance = ComplianceDirector(
         api_key=_required_env("OPENAI_API_KEY"),
         tavily_api_key=_required_env("TAVILY_API_KEY"),
@@ -358,6 +394,9 @@ def _init_runtime() -> RuntimeServices:
         anchor_audio_path=_resolve_anchor_audio_path(),
     )
     focus_group.ensure_models_ready()
+    # Pre-compute anchor audio so the first scoring step doesn't pay the whisperx cost.
+    tribe.warmup()
+    _RUNTIME_READY = True
     return RuntimeServices(compliance=compliance, focus_group=focus_group, tribe=tribe)
 
 
@@ -368,10 +407,23 @@ def _get_runtime() -> RuntimeServices:
     return _RUNTIME
 
 
+def is_runtime_ready() -> bool:
+    """Returns True once TRIBE has loaded and the anchor audio warmup is complete."""
+    return _RUNTIME_READY
+
+
 class NeuropitchEnvironment(Environment):
     """Single-step NeuroPitch environment with layered verification."""
 
-    SUPPORTS_CONCURRENT_SESSIONS: bool = False
+    # Each instance owns its own episode state (_brief_idx, _product_brief,
+    # _competitor_ad). The shared _RUNTIME singleton is read-only after init
+    # (evaluate/vote/get_biological_reward are stateless transforms). Safe to
+    # run multiple sessions concurrently.
+    SUPPORTS_CONCURRENT_SESSIONS: bool = True
+    # Hard cap on TRIBE inference per step. Warmup has already cached the anchor
+    # audio, so inference should be well under this; it's a safety net for
+    # GPU contention or unexpected slowness.
+    _TRIBE_TIMEOUT_S: int = 180
 
     def __init__(self):
         self._state = State(episode_id=str(uuid4()), step_count=0)
@@ -447,7 +499,28 @@ class NeuropitchEnvironment(Environment):
         votes = self._runtime.focus_group.vote(pitch_text)
         buy_votes = sum(1 for vote in votes.values() if vote == "BUY")
         vote_reward = buy_votes * 0.2
-        tribe_scores = self._runtime.tribe.get_biological_reward(pitch_text)
+
+        # Run TRIBE in a bounded thread so a GPU stall can't hang the WebSocket session.
+        with ThreadPoolExecutor(max_workers=1) as _tribe_pool:
+            _tribe_future = _tribe_pool.submit(
+                self._runtime.tribe.get_biological_reward, pitch_text
+            )
+            try:
+                tribe_scores = _tribe_future.result(timeout=self._TRIBE_TIMEOUT_S)
+            except FuturesTimeoutError:
+                _env_log.warning(
+                    "TRIBE scoring exceeded %ds — using zero biological scores for this step.",
+                    self._TRIBE_TIMEOUT_S,
+                )
+                tribe_scores = {
+                    "z_sts": 0.0, "z_tpj": 0.0, "z_broca_45": 0.0, "biological_reward": 0.0,
+                }
+            except Exception as exc:
+                _env_log.warning("TRIBE scoring failed (%s) — using zero biological scores.", exc)
+                tribe_scores = {
+                    "z_sts": 0.0, "z_tpj": 0.0, "z_broca_45": 0.0, "biological_reward": 0.0,
+                }
+
         biological_reward = tribe_scores["biological_reward"]
         components["vote_reward"] = float(vote_reward)
         components["biological_reward"] = float(biological_reward)

@@ -31,10 +31,10 @@ from pydantic import BaseModel, Field
 
 try:
     from ..models import NeuropitchAction, NeuropitchObservation
-    from .neuropitch_env_environment import NeuropitchEnvironment
+    from .neuropitch_env_environment import NeuropitchEnvironment, _get_runtime, is_runtime_ready
 except (ModuleNotFoundError, ImportError):  # pragma: no cover
     from models import NeuropitchAction, NeuropitchObservation
-    from server.neuropitch_env_environment import NeuropitchEnvironment
+    from server.neuropitch_env_environment import NeuropitchEnvironment, _get_runtime, is_runtime_ready
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -187,9 +187,30 @@ app = FastAPI(title="NeuroPitch Server")
 app.mount("/openenv", openenv_app)
 app.mount("/web/static", StaticFiles(directory=str(WEB_DIR), html=False), name="web-static")
 
+
+@app.on_event("startup")
+async def _startup_warmup() -> None:
+    """Kick off TRIBE model loading in a background thread so the HTTP server
+    starts responding immediately. The /api/ready endpoint reflects completion."""
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _get_runtime)
+
 _http_env = NeuropitchEnvironment()
 _last_observation: NeuropitchObservation | None = None
 _trainer = TrainingManager()
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    """Docker HEALTHCHECK target — always returns 200 once the HTTP server is up."""
+    return {"status": "ok"}
+
+
+@app.get("/api/ready")
+def api_ready() -> dict[str, object]:
+    """Returns whether TRIBE warmup has completed. Poll this before starting training."""
+    ready = is_runtime_ready()
+    return {"ready": ready, "message": "TRIBE loaded and anchor audio cached." if ready else "Still loading TRIBE model…"}
 
 
 @app.get("/api/env-config")

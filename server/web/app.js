@@ -267,6 +267,16 @@ function applyTrainingMetric(metric) {
   if (metric["loss"] !== undefined) {
     elements.trainLoss.textContent = Number(metric["loss"]).toFixed(6);
   }
+  if (metric.type === "server_warming") {
+    elements.logs.textContent += `\n[⏳] ${metric.message}\n`;
+    elements.logs.scrollTop = elements.logs.scrollHeight;
+    return;
+  }
+  if (metric.type === "server_ready") {
+    elements.logs.textContent += `\n[✓] ${metric.message}\n`;
+    elements.logs.scrollTop = elements.logs.scrollHeight;
+    return;
+  }
   if (metric.type === "generation") {
     elements.genBrief.textContent = metric.product_brief || "—";
     elements.genText.textContent = metric.generated_pitch || "(empty)";

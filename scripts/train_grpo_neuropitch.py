@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import requests
+
 # Allow `from client import ...` when running: python scripts/train_grpo_neuropitch.py
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -149,9 +151,20 @@ class NeuroPitchRolloutEnv:
 
     base_url: str
 
+    # One scoring step = compliance (~5s) + parallel Ollama voting (~20s) + TRIBE (~30s).
+    # Allow 5 minutes to be safe; the server-side timeouts are tighter and will surface
+    # sooner if a component actually hangs.
+    _STEP_TIMEOUT_S: int = 300
+
     def __post_init__(self):
         # .sync() returns a SyncEnvClient whose methods block the calling thread.
-        self._sync_client = NeuropitchEnv(base_url=self.base_url).sync()
+        # Try to pass a step timeout; fall back silently if the installed openenv
+        # version doesn't support that parameter yet.
+        env = NeuropitchEnv(base_url=self.base_url)
+        try:
+            self._sync_client = env.sync(timeout=self._STEP_TIMEOUT_S)
+        except TypeError:
+            self._sync_client = env.sync()
         self.reward = 0.0
         self.done = False
 
@@ -416,6 +429,41 @@ def _effective_batch(
     return per_device * world_size * grad_accum
 
 
+def _wait_for_server_ready(environment_url: str, timeout: int = 300) -> None:
+    """Poll /api/ready until TRIBE warmup is complete or timeout is reached.
+
+    The server's HTTP port becomes available quickly, but TRIBE model loading
+    can take 30–120 s. Scoring rollouts before TRIBE is ready produces
+    TimeoutError / CAPACITY_REACHED on the first few batches.
+    """
+    # Derive the base URL from the OpenEnv WebSocket URL
+    base = environment_url.replace("/openenv", "").rstrip("/")
+    ready_url = f"{base}/api/ready"
+    deadline = time.time() + timeout
+    last_msg = ""
+    while time.time() < deadline:
+        try:
+            resp = requests.get(ready_url, timeout=5)
+            if resp.ok:
+                data = resp.json()
+                if data.get("ready"):
+                    logger.info("Server ready: %s", data.get("message", ""))
+                    _emit_metric({"type": "server_ready", "message": data.get("message", "")})
+                    return
+                msg = data.get("message", "")
+                if msg != last_msg:
+                    logger.info("Waiting for server: %s", msg)
+                    _emit_metric({"type": "server_warming", "message": msg})
+                    last_msg = msg
+        except Exception as exc:
+            logger.debug("Server not yet reachable (%s), retrying…", exc)
+        time.sleep(5)
+    logger.warning(
+        "Server did not become ready within %ds — proceeding anyway (TRIBE may still be loading).",
+        timeout,
+    )
+
+
 def _hf_login() -> None:
     """Login to Hugging Face Hub using HF_TOKEN if present in the environment."""
     token = os.environ.get("HF_TOKEN", "").strip()
@@ -433,6 +481,9 @@ def main() -> None:
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     _hf_login()
+    # Block until TRIBE has finished loading and the anchor audio is cached.
+    # This prevents the first few rollouts from timing out on a cold server.
+    _wait_for_server_ready(args.environment_url)
 
     # TRL: effective batch must be divisible by num_generations
     eff = _effective_batch(
