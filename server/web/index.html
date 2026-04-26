@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NeuroPitch Simulation Console</title>
+    <link rel="stylesheet" href="/web/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>NeuroPitch: Pitch Room vs Consumer Brain</h1>
+      <div class="controls">
+        <button id="start-training-btn">Begin Training / Start Simulation</button>
+        <span id="step-counter">Step: 0</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="pane">
+        <h2>Pitch Room</h2>
+        <div class="card">
+          <h3>Product Brief</h3>
+          <p id="product-brief"></p>
+          <h3>Competitor Ad</h3>
+          <p id="competitor-ad"></p>
+        </div>
+        <div class="card">
+          <h3>Compliance Director</h3>
+          <pre id="compliance-log">Awaiting reset...</pre>
+        </div>
+        <div class="card">
+          <h3>Teleprompter</h3>
+          <textarea id="pitch-input" rows="8" placeholder="Type or paste learner pitch here..."></textarea>
+          <button id="run-step-btn">Submit Pitch Step</button>
+        </div>
+        <div class="card">
+          <h3>Consumer Panel</h3>
+          <div id="panel-votes" class="vote-grid"></div>
+        </div>
+      </section>
+
+      <section class="pane">
+        <h2>Consumer Brain</h2>
+        <div class="card">
+          <h3>Neuromarketing Heatmap Proxy</h3>
+          <div class="brain-grid">
+            <div class="brain-cell">
+              <span>STS</span>
+              <strong id="z-sts">0.000</strong>
+            </div>
+            <div class="brain-cell">
+              <span>TPJ</span>
+              <strong id="z-tpj">0.000</strong>
+            </div>
+            <div class="brain-cell warning">
+              <span>Broca_45</span>
+              <strong id="z-broca">0.000</strong>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>ROI Reward Chart</h3>
+          <canvas id="reward-chart" width="560" height="220"></canvas>
+          <p id="reward-total">Total Reward: 0.000</p>
+        </div>
+        <div class="card">
+          <h3>Training Logs (Live)</h3>
+          <pre id="training-logs"></pre>
+        </div>
+      </section>
+    </main>
+
+    <script src="/web/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,28 @@
+# VCS and editor metadata
+.git
+.gitignore
+.cursor
+.idea
+.vscode
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments and caches
+.venv/
+venv/
+cache/
+logs/
+outputs/
+checkpoints/
+htmlcov/
+.coverage
+
+# OS junk
+.DS_Store
