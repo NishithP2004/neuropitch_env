@@ -16,6 +16,11 @@ const elements = {
   rewardTotal: document.getElementById("reward-total"),
   logs: document.getElementById("training-logs"),
   chart: document.getElementById("reward-chart"),
+  trainStep: document.getElementById("train-step"),
+  trainReward: document.getElementById("train-reward"),
+  trainRewardStd: document.getElementById("train-reward-std"),
+  trainKl: document.getElementById("train-kl"),
+  trainLoss: document.getElementById("train-loss"),
 };
 
 function drawRewardChart() {
@@ -98,12 +103,37 @@ async function runStep() {
   renderObservation(payload);
 }
 
+const METRIC_PREFIX = "METRIC:";
+
+function applyTrainingMetric(metric) {
+  if (metric.step !== undefined) {
+    elements.trainStep.textContent = metric.step;
+  }
+  // TRL logs rewards under both "reward" and "rewards/reward_func/mean"
+  const rewardVal = metric["reward"] ?? metric["rewards/reward_func/mean"];
+  if (rewardVal !== undefined) {
+    elements.trainReward.textContent = Number(rewardVal).toFixed(4);
+    rewardHistory.push(Number(rewardVal));
+    drawRewardChart();
+  }
+  const stdVal = metric["reward_std"] ?? metric["rewards/reward_func/std"];
+  if (stdVal !== undefined) {
+    elements.trainRewardStd.textContent = Number(stdVal).toFixed(4);
+  }
+  if (metric["kl"] !== undefined) {
+    elements.trainKl.textContent = Number(metric["kl"]).toFixed(5);
+  }
+  if (metric["loss"] !== undefined) {
+    elements.trainLoss.textContent = Number(metric["loss"]).toFixed(6);
+  }
+}
+
 async function startTraining() {
   const body = {
-    model_name: "Qwen/Qwen2.5-3B-Instruct",
+    model_name: "Qwen/Qwen2.5-1.5B-Instruct",
     output_dir: "/data/neuropitch-grpo",
-    max_steps: 100,
-    learning_rate: 1e-6,
+    max_steps: 200,
+    learning_rate: 5e-6,
     environment_url: `${window.location.origin}/openenv`,
     use_unsloth: true,
   };
@@ -123,7 +153,23 @@ async function startTraining() {
 function connectTrainingStream() {
   const events = new EventSource("/api/train/stream");
   events.onmessage = (event) => {
-    elements.logs.textContent += `${event.data}\n`;
+    const data = event.data;
+    if (data.startsWith(METRIC_PREFIX)) {
+      try {
+        const metric = JSON.parse(data.slice(METRIC_PREFIX.length));
+        applyTrainingMetric(metric);
+        // Also log a compact summary line instead of the raw JSON blob
+        if (metric.type === "step") {
+          const r = metric["reward"] ?? metric["rewards/reward_func/mean"];
+          const summary = `[step ${metric.step}] reward=${r !== undefined ? Number(r).toFixed(4) : "?"} loss=${metric.loss !== undefined ? Number(metric.loss).toFixed(6) : "?"}`;
+          elements.logs.textContent += `${summary}\n`;
+        }
+      } catch {
+        elements.logs.textContent += `${data}\n`;
+      }
+    } else {
+      elements.logs.textContent += `${data}\n`;
+    }
     elements.logs.scrollTop = elements.logs.scrollHeight;
   };
 }

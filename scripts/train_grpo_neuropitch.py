@@ -137,14 +137,30 @@ def _patch_torch_argsort_for_cuda_bool() -> None:
 
 @dataclass
 class NeuroPitchRolloutEnv:
-    """Client wrapper for one scoring episode (reset + step)."""
+    """Client wrapper for one scoring episode (reset + step).
+
+    Uses the OpenEnv SyncEnvClient (.sync() wrapper) so the reward function
+    can call reset/step without async/await. The WebSocket connection is kept
+    alive across reset → step by using this class as a context manager.
+    """
 
     base_url: str
 
     def __post_init__(self):
-        self.client = NeuropitchEnv(base_url=self.base_url)
+        # .sync() returns a SyncEnvClient whose methods block the calling thread.
+        self._sync_client = NeuropitchEnv(base_url=self.base_url).sync()
         self.reward = 0.0
         self.done = False
+
+    def __enter__(self) -> "NeuroPitchRolloutEnv":
+        self._sync_client.__enter__()
+        return self
+
+    def __exit__(self, *args) -> None:
+        try:
+            self._sync_client.__exit__(*args)
+        except Exception:
+            pass
 
     def reset(
         self,
@@ -156,7 +172,7 @@ class NeuroPitchRolloutEnv:
             reset_kw["product_brief"] = product_brief
         if competitor_ad is not None:
             reset_kw["competitor_ad"] = competitor_ad
-        result = self.client.reset(**reset_kw)
+        result = self._sync_client.reset(**reset_kw)
         self.reward = 0.0
         self.done = False
         obs = result.observation
@@ -165,7 +181,7 @@ class NeuroPitchRolloutEnv:
     def submit_pitch(self, pitch_text: str) -> str:
         if self.done:
             raise ValueError("Episode already finished.")
-        result = self.client.step(NeuropitchAction(pitch_text=pitch_text))
+        result = self._sync_client.step(NeuropitchAction(pitch_text=pitch_text))
         obs = result.observation
         self.reward = float(result.reward or obs.final_reward or 0.0)
         self.done = bool(result.done)
@@ -206,28 +222,23 @@ def _make_neuropitch_reward(environment_url: str):
         a_list = competitor_ad if isinstance(competitor_ad, (list, tuple)) else [competitor_ad]
         scores: list[float] = []
         for idx, raw in enumerate(completions):
-            env: NeuroPitchRolloutEnv | None = None
+            b = b_list[idx] if idx < len(b_list) else b_list[-1]
+            a = a_list[idx] if idx < len(a_list) else a_list[-1]
             try:
-                env = NeuroPitchRolloutEnv(base_url=environment_url)
-                text = _completion_to_str(raw)
-                text = _parse_pitch_text(text)
-                b = b_list[idx] if idx < len(b_list) else b_list[-1]
-                a = a_list[idx] if idx < len(a_list) else a_list[-1]
-                env.reset(product_brief=b, competitor_ad=a)
-                if not text:
-                    scores.append(-1.0)
-                    continue
-                env.submit_pitch(text)
-                scores.append(float(env.reward))
+                # Context manager opens WebSocket, keeps it alive for reset→step,
+                # then closes cleanly on exit — no manual close() needed.
+                with NeuroPitchRolloutEnv(base_url=environment_url) as env:
+                    text = _completion_to_str(raw)
+                    text = _parse_pitch_text(text)
+                    env.reset(product_brief=b, competitor_ad=a)
+                    if not text:
+                        scores.append(-1.0)
+                        continue
+                    env.submit_pitch(text)
+                    scores.append(float(env.reward))
             except Exception:
                 logger.exception("NeuroPitch env scoring failed; assigning penalty")
                 scores.append(-2.0)
-            finally:
-                if env is not None:
-                    try:
-                        env.client.close()
-                    except Exception:
-                        pass
         return scores
 
     return reward_func
@@ -297,6 +308,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+_METRIC_PREFIX = "METRIC:"
+
+
+def _emit_metric(data: dict) -> None:
+    """Print a single JSON line the server SSE stream forwards to the UI."""
+    print(f"{_METRIC_PREFIX}{json.dumps(data)}", flush=True)
+
+
 def _effective_batch(
     per_device: int, grad_accum: int, world_size: int = 1
 ) -> int:
@@ -337,8 +356,26 @@ def main() -> None:
         FastLanguageModel = None  # type: ignore[misc, assignment]
 
     from datasets import Dataset
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, TrainerControl, TrainerState
+    from transformers.training_args import TrainingArguments
     from trl import GRPOConfig, GRPOTrainer
+
+    class MetricEmitterCallback(TrainerCallback):
+        """Emit METRIC: JSON lines to stdout so the server SSE stream can forward them to the UI."""
+
+        def on_log(
+            self,
+            args: TrainingArguments,
+            state: TrainerState,
+            control: TrainerControl,
+            logs: dict | None = None,
+            **kwargs,
+        ) -> None:
+            if not logs:
+                return
+            numeric = {k: round(v, 6) for k, v in logs.items() if isinstance(v, (int, float))}
+            if numeric:
+                _emit_metric({"type": "step", "step": state.global_step, **numeric})
 
     n = args.num_episodes
     brief_ads = [_DEFAULT_BRIEFS[i % len(_DEFAULT_BRIEFS)] for i in range(n)]
@@ -427,7 +464,9 @@ def main() -> None:
         reward_funcs=_make_neuropitch_reward(args.environment_url),
         train_dataset=dataset,
         args=train_args,
+        callbacks=[MetricEmitterCallback()],
     )
+    _emit_metric({"type": "start", "model": args.model_name, "max_steps": args.max_steps})
     trainer.train()
     trainer.save_model(args.output_dir)
     if args.push_to_hub:

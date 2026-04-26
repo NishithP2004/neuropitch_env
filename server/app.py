@@ -47,10 +47,10 @@ class SimulationStepPayload(BaseModel):
 
 
 class TrainStartPayload(BaseModel):
-    model_name: str = "Qwen/Qwen2.5-3B-Instruct"
+    model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
     output_dir: str = "/data/neuropitch-grpo"
-    max_steps: int = 100
-    learning_rate: float = 1e-6
+    max_steps: int = 200
+    learning_rate: float = 5e-6
     push_to_hub: bool = False
     environment_url: str = "http://127.0.0.1:8000/openenv"
     use_unsloth: bool = True

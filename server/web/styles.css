@@ -153,8 +153,37 @@ pre {
   color: var(--accent);
 }
 
+.train-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+
+.stat-cell {
+  border: 1px solid #3c467e;
+  padding: 8px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stat-cell span {
+  font-size: 0.7rem;
+  color: #8892c8;
+  text-transform: uppercase;
+}
+
+.stat-cell strong {
+  font-size: 1rem;
+  color: var(--accent);
+}
+
 @media (max-width: 1080px) {
   .layout {
     grid-template-columns: 1fr;
+  }
+  .train-stats {
+    grid-template-columns: repeat(3, 1fr);
   }
 }
