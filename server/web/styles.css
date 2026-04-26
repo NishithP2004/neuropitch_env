@@ -60,6 +60,193 @@ button:hover {
   font-size: 11px;
 }
 
+/* ── Training config modal ───────────────────────────────────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-backdrop[hidden] { display: none; }
+
+.modal {
+  background: #1a1a30;
+  border: 2px solid #3c467e;
+  padding: 24px 28px;
+  width: min(520px, 94vw);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-title {
+  font-size: 11px;
+  margin: 0 0 20px;
+  color: var(--accent);
+}
+
+.modal-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.modal-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 7px;
+  color: var(--muted);
+}
+
+.modal-grid input[type="text"],
+.modal-grid input[type="number"] {
+  background: #0f0f22;
+  border: 1px solid #3c467e;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 8px;
+  padding: 6px 8px;
+  width: 100%;
+}
+
+.modal-grid input:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
+.modal-checkbox {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+  grid-column: span 2;
+}
+
+.modal-checkbox input { width: auto; }
+
+.modal-full-row {
+  grid-column: span 2;
+}
+
+.hint {
+  color: #555e8a;
+  font-size: 6px;
+}
+
+.modal-error {
+  color: var(--bad);
+  font-size: 7px;
+  margin: 12px 0 0;
+}
+
+.modal-error[hidden] { display: none; }
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.btn-primary {
+  background: #1a3a5e;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-primary:hover { background: #1f4875; }
+
+/* ── Flow banner ─────────────────────────────────────────────── */
+.flow-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 16px 24px 10px;
+  border-bottom: 1px solid #2c3154;
+  background: #13132a;
+}
+
+.flow-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 72px;
+  text-align: center;
+}
+
+.flow-icon { font-size: 20px; }
+
+.flow-label {
+  font-size: 7px;
+  color: var(--accent);
+  line-height: 1.6;
+}
+
+.flow-reward {
+  font-size: 6px;
+  color: var(--good);
+  margin-top: 2px;
+}
+
+.flow-reward--bad { color: var(--bad); }
+.flow-step--check .flow-label { color: #ffcc66; }
+.flow-step--reward .flow-label { color: var(--good); }
+
+.flow-arrow {
+  font-size: 18px;
+  color: #3c467e;
+  align-self: center;
+  padding-bottom: 14px;
+}
+
+/* ── Reward formula explainer ────────────────────────────────── */
+.reward-explainer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 24px;
+  background: #11112a;
+  border-bottom: 2px solid #2c3154;
+}
+
+.reward-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.reward-tag {
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-size: 7px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tag-bad  { background: #4a1020; color: var(--bad);   border: 1px solid var(--bad); }
+.tag-good { background: #0d2e1c; color: var(--good);  border: 1px solid var(--good); }
+.tag-warn { background: #2e2200; color: #ffcc66;      border: 1px solid #ffcc66; }
+
+.reward-row code {
+  color: #c0d8ff;
+  font-size: 8px;
+  background: none;
+}
+
+.reward-note {
+  color: var(--muted);
+  font-size: 7px;
+  margin-left: auto;
+}
+
+/* ── Main layout ─────────────────────────────────────────────── */
 .layout {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -153,6 +340,42 @@ pre {
   color: var(--accent);
 }
 
+.progress-wrap {
+  background: #1a1f45;
+  border-radius: 4px;
+  height: 10px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+.progress-label {
+  font-size: 0.75rem;
+  color: #8892c8;
+  margin: 0 0 10px;
+}
+
+#stop-training-btn {
+  background: #6b1f1f;
+  color: #ffaaaa;
+  border: 1px solid #c0392b;
+}
+
+#stop-training-btn:not(:disabled):hover {
+  background: #8e2424;
+}
+
+#stop-training-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .train-stats {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -186,4 +409,53 @@ pre {
   .train-stats {
     grid-template-columns: repeat(3, 1fr);
   }
+  .flow-banner {
+    gap: 4px;
+    padding: 12px;
+  }
+  .reward-row {
+    flex-direction: column;
+    gap: 4px;
+  }
+  .reward-note {
+    margin-left: 0;
+  }
+}
+
+/* ── Latest Generation panel ─────────────────────────────────────────────── */
+.generation-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gen-label {
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #6673a8;
+  margin: 6px 0 0;
+}
+
+.gen-label:first-child { margin-top: 0; }
+
+.gen-value {
+  font-size: 10px;
+  color: var(--text);
+  margin: 0;
+}
+
+.gen-value.muted { color: #667; }
+
+.gen-pitch {
+  background: #11162f;
+  border: 1px solid #39417a;
+  padding: 8px;
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow-y: auto;
+  margin: 0;
+  border-radius: 4px;
 }

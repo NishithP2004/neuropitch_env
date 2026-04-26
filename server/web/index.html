@@ -10,10 +10,65 @@
     <header class="topbar">
       <h1>NeuroPitch: Pitch Room vs Consumer Brain</h1>
       <div class="controls">
-        <button id="start-training-btn">Begin Training / Start Simulation</button>
+        <button id="start-training-btn">Begin Training</button>
+        <button id="stop-training-btn" disabled>Stop Training</button>
         <span id="step-counter">Step: 0</span>
       </div>
     </header>
+
+    <section class="flow-banner">
+      <div class="flow-step">
+        <div class="flow-icon">📋</div>
+        <div class="flow-label">Product Brief<br/>+ Competitor Ad</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon">🤖</div>
+        <div class="flow-label">LLM writes<br/>Ad Pitch</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step flow-step--check">
+        <div class="flow-icon">⚖️</div>
+        <div class="flow-label">Compliance<br/>Director</div>
+        <div class="flow-reward flow-reward--bad">fail → −1.0</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon">👥</div>
+        <div class="flow-label">5 Ollama<br/>Personas</div>
+        <div class="flow-reward">+0.2 / BUY vote</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="flow-icon">🧠</div>
+        <div class="flow-label">TRIBE v2<br/>Brain Model</div>
+        <div class="flow-reward">+z<sub>STS</sub> +z<sub>TPJ</sub> −z<sub>Broca</sub></div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step flow-step--reward">
+        <div class="flow-icon">🏆</div>
+        <div class="flow-label">Final<br/>Reward</div>
+        <div class="flow-reward">→ GRPO gradient</div>
+      </div>
+    </section>
+
+    <section class="reward-explainer">
+      <div class="reward-row">
+        <span class="reward-tag tag-bad">NON-COMPLIANT</span>
+        <code>reward = −1.0 + formatting_penalty</code>
+        <span class="reward-note">Focus group &amp; brain model skipped</span>
+      </div>
+      <div class="reward-row">
+        <span class="reward-tag tag-good">COMPLIANT</span>
+        <code>reward = formatting_penalty + (buy_votes × 0.2) + (z<sub>STS</sub> + z<sub>TPJ</sub> − z<sub>Broca_45</sub>)</code>
+        <span class="reward-note">All layers run</span>
+      </div>
+      <div class="reward-row">
+        <span class="reward-tag tag-warn">FORMAT</span>
+        <code>formatting_penalty = −0.5 if &gt; 120 words</code>
+        <span class="reward-note">Applied before all other layers</span>
+      </div>
+    </section>
 
     <main class="layout">
       <section class="pane">
@@ -65,6 +120,10 @@
         </div>
         <div class="card">
           <h3>Training Progress</h3>
+          <div class="progress-wrap">
+            <div id="progress-bar" class="progress-bar"></div>
+          </div>
+          <p id="progress-label" class="progress-label">—</p>
           <div class="train-stats">
             <div class="stat-cell"><span>Step</span><strong id="train-step">—</strong></div>
             <div class="stat-cell"><span>Reward (mean)</span><strong id="train-reward">—</strong></div>
@@ -74,11 +133,78 @@
           </div>
         </div>
         <div class="card">
+          <h3>Latest Generation</h3>
+          <div class="generation-box">
+            <p class="gen-label">Brief</p>
+            <p id="gen-brief" class="gen-value muted">—</p>
+            <p class="gen-label">Generated Pitch</p>
+            <pre id="gen-text" class="gen-pitch">Waiting for training to produce a rollout…</pre>
+            <p class="gen-label">Rollout Reward</p>
+            <p id="gen-reward" class="gen-value muted">—</p>
+          </div>
+        </div>
+        <div class="card">
           <h3>Training Logs (Live)</h3>
           <pre id="training-logs"></pre>
         </div>
       </section>
     </main>
+
+    <!-- Training config modal -->
+    <div id="train-modal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <h2 class="modal-title">Training Configuration</h2>
+
+        <div class="modal-grid">
+          <label>
+            Model
+            <input id="cfg-model" type="text" value="Qwen/Qwen2.5-1.5B-Instruct" />
+          </label>
+          <label>
+            Output dir
+            <input id="cfg-output-dir" type="text" value="/data/neuropitch-grpo" />
+          </label>
+          <label>
+            Dataset size <span class="hint">(num_episodes)</span>
+            <input id="cfg-num-episodes" type="number" min="3" step="3" value="600" />
+          </label>
+          <label>
+            Max steps
+            <input id="cfg-max-steps" type="number" min="1" step="10" value="200" />
+          </label>
+          <label>
+            Learning rate
+            <input id="cfg-lr" type="number" step="1e-6" min="1e-7" value="5e-6" />
+          </label>
+          <label>
+            Rollouts / prompt <span class="hint">(num_generations)</span>
+            <input id="cfg-num-gen" type="number" min="2" step="2" value="2" />
+          </label>
+          <label>
+            Gradient accum. steps
+            <input id="cfg-grad-accum" type="number" min="1" step="1" value="2" />
+          </label>
+          <label class="modal-checkbox">
+            <input id="cfg-unsloth" type="checkbox" checked />
+            Use Unsloth (QLoRA 4-bit)
+          </label>
+          <label class="modal-checkbox">
+            <input id="cfg-push-to-hub" type="checkbox" />
+            Push to Hugging Face Hub when done
+          </label>
+          <label id="hub-model-id-label" class="modal-full-row" hidden>
+            Hub model ID <span class="hint">(e.g. your-username/neuropitch-grpo)</span>
+            <input id="cfg-hub-model-id" type="text" placeholder="username/model-name" />
+          </label>
+        </div>
+
+        <p id="modal-error" class="modal-error" hidden></p>
+        <div class="modal-actions">
+          <button id="modal-cancel-btn">Cancel</button>
+          <button id="modal-start-btn" class="btn-primary">Start Training</button>
+        </div>
+      </div>
+    </div>
 
     <script src="/web/static/app.js"></script>
   </body>

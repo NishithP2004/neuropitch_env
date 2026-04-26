@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import os
 import subprocess
 import threading
 from collections import deque
@@ -50,8 +52,12 @@ class TrainStartPayload(BaseModel):
     model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
     output_dir: str = "/data/neuropitch-grpo"
     max_steps: int = 200
+    num_episodes: int = 600
     learning_rate: float = 5e-6
+    num_generations: int = 2
+    gradient_accumulation_steps: int = 2
     push_to_hub: bool = False
+    hub_model_id: str = ""
     environment_url: str = "http://127.0.0.1:8000/openenv"
     use_unsloth: bool = True
 
@@ -84,21 +90,28 @@ class TrainingManager:
             cmd = [
                 "python",
                 str(SCRIPT_PATH),
-                "--model-name",
-                payload.model_name,
-                "--output-dir",
-                payload.output_dir,
-                "--max-steps",
-                str(payload.max_steps),
-                "--learning-rate",
-                str(payload.learning_rate),
-                "--environment-url",
-                payload.environment_url,
+                "--model-name", payload.model_name,
+                "--output-dir", payload.output_dir,
+                "--max-steps", str(payload.max_steps),
+                "--num-episodes", str(payload.num_episodes),
+                "--learning-rate", str(payload.learning_rate),
+                "--num-generations", str(payload.num_generations),
+                "--gradient-accumulation-steps", str(payload.gradient_accumulation_steps),
+                "--environment-url", payload.environment_url,
             ]
             if payload.push_to_hub:
                 cmd.append("--push-to-hub")
+            if payload.hub_model_id:
+                cmd.extend(["--hub-model-id", payload.hub_model_id])
             if not payload.use_unsloth:
                 cmd.append("--no-unsloth")
+
+            # Forward HF_TOKEN so the subprocess can log in to the Hub
+            env = copy.copy(os.environ)
+            hf_token = os.environ.get("HF_TOKEN", "").strip()
+            if hf_token:
+                env["HF_TOKEN"] = hf_token
+
             self._logs.clear()
             self._status = "running"
             self._exit_code = None
@@ -108,6 +121,7 @@ class TrainingManager:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=env,
             )
             thread = threading.Thread(target=self._stream_output, daemon=True)
             thread.start()
@@ -125,6 +139,15 @@ class TrainingManager:
         self._exit_code = process.returncode
         self._status = "completed" if process.returncode == 0 else "failed"
         self._publish(f"[training-finished] exit_code={process.returncode}")
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            if self._process is None or self._process.poll() is not None:
+                return {"status": self._status, "message": "No running process."}
+            self._process.terminate()
+            self._status = "stopped"
+            self._publish("[training-stopped] Process terminated by user.")
+            return {"status": "stopped", "pid": self._process.pid}
 
     def status(self) -> dict[str, Any]:
         running = self._process is not None and self._process.poll() is None
@@ -153,7 +176,11 @@ openenv_app = create_app(
     NeuropitchAction,
     NeuropitchObservation,
     env_name="neuropitch_env",
-    max_concurrent_envs=1,
+    # Allow multiple concurrent WebSocket sessions.
+    # Each GRPO rollout opens its own session sequentially, but a previous timed-out
+    # session can stay open server-side while the client has already given up.
+    # 8 slots gives plenty of headroom for stragglers without unbounded memory growth.
+    max_concurrent_envs=8,
 )
 
 app = FastAPI(title="NeuroPitch Server")
@@ -163,6 +190,13 @@ app.mount("/web/static", StaticFiles(directory=str(WEB_DIR), html=False), name="
 _http_env = NeuropitchEnvironment()
 _last_observation: NeuropitchObservation | None = None
 _trainer = TrainingManager()
+
+
+@app.get("/api/env-config")
+def api_env_config() -> dict[str, str]:
+    """Return safe public config values from the server environment."""
+    hf_user = os.environ.get("HF_USERNAME", "").strip()
+    return {"hf_username": hf_user}
 
 
 @app.get("/")
@@ -212,6 +246,11 @@ def api_train_start(payload: TrainStartPayload) -> dict[str, Any]:
 @app.get("/api/train/status")
 def api_train_status() -> dict[str, Any]:
     return _trainer.status()
+
+
+@app.post("/api/train/stop")
+def api_train_stop() -> dict[str, Any]:
+    return _trainer.stop()
 
 
 @app.get("/api/train/stream")

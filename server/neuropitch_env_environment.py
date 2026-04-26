@@ -83,12 +83,22 @@ class ComplianceDirector:
         if not self._tavily_key:
             return "Web evidence unavailable (TAVILY_API_KEY not configured)."
         try:
+            # Tavily current API: Bearer token in Authorization header (no api_key in body).
+            # requests sets Content-Type automatically when json= is used; do not duplicate it.
+            truncated_query = query[:300]
             response = requests.post(
                 "https://api.tavily.com/search",
-                json={"api_key": self._tavily_key, "query": query, "max_results": 5},
+                headers={"Authorization": f"Bearer {self._tavily_key}"},
+                json={"query": truncated_query, "max_results": 5},
                 timeout=20,
             )
-            response.raise_for_status()
+            if not response.ok:
+                _compliance_log.warning(
+                    "Tavily %s: %s — proceeding without web evidence.",
+                    response.status_code,
+                    response.text[:300],
+                )
+                return "Web search unavailable; evaluate based on known advertising standards only."
             data = response.json()
             snippets = []
             for item in data.get("results", []):
@@ -97,23 +107,35 @@ class ComplianceDirector:
                 url = item.get("url", "")
                 snippets.append(f"- {title} ({url}): {content}")
             return "\n".join(snippets) if snippets else "No evidence returned by search."
-        except requests.HTTPError as exc:
-            _compliance_log.warning("Tavily HTTP error (%s); proceeding without web evidence.", exc)
-            return f"Web search unavailable ({exc}); evaluate based on known advertising standards."
         except Exception as exc:
             _compliance_log.warning("Tavily request failed (%s); proceeding without web evidence.", exc)
-            return "Web search unavailable; evaluate based on known advertising standards."
+            return "Web search unavailable; evaluate based on known advertising standards only."
+
+    _SYSTEM_WITH_EVIDENCE = (
+        "You are a Compliance Director for advertising. "
+        "Return JSON only with keys: compliant (bool), violations (list[str]), log (str). "
+        "Mark compliant=false if the pitch contains clearly illegal claims: "
+        "guaranteed medical cures, fabricated statistics, dangerous safety claims, "
+        "misleading price comparisons, or regulated terms (e.g. 'FDA approved') used falsely. "
+        "General aspirational language ('energize your day', 'feel refreshed', 'high quality') "
+        "is standard marketing and should be marked compliant."
+    )
+    _SYSTEM_WITHOUT_EVIDENCE = (
+        "You are a Compliance Director for advertising with no web evidence available. "
+        "Return JSON only with keys: compliant (bool), violations (list[str]), log (str). "
+        "Without external evidence, mark compliant=false ONLY for blatantly illegal claims: "
+        "guaranteed disease cures, life-threatening safety falsehoods, or explicitly fraudulent "
+        "statements. Common aspirational phrases, product benefits, and lifestyle claims are "
+        "acceptable standard advertising copy — do NOT reject them without hard evidence."
+    )
 
     def evaluate(self, product_brief: str, pitch_text: str) -> ComplianceResult:
         evidence = self._web_search(
-            f"Validate advertising claims and legal guidance for: {product_brief}. "
-            f"Claims to verify: {pitch_text[:500]}"
+            f"Advertising compliance and claims for: {product_brief[:150]}. "
+            f"Verify: {pitch_text[:150]}"
         )
-        system_prompt = (
-            "You are a strict Compliance Director for advertising. "
-            "Return JSON only with keys: compliant (bool), violations (list[str]), log (str). "
-            "Mark compliant=false if any unverifiable medical/legal/superlative or deceptive claim exists."
-        )
+        has_evidence = "unavailable" not in evidence.lower()
+        system_prompt = self._SYSTEM_WITH_EVIDENCE if has_evidence else self._SYSTEM_WITHOUT_EVIDENCE
         user_prompt = (
             f"Product brief:\n{product_brief}\n\nPitch:\n{pitch_text}\n\n"
             f"External evidence:\n{evidence}\n\n"

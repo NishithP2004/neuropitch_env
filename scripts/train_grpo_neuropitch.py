@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import logging
 import os
+import random
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -185,6 +188,16 @@ class NeuroPitchRolloutEnv:
         obs = result.observation
         self.reward = float(result.reward or obs.final_reward or 0.0)
         self.done = bool(result.done)
+        # Emit rich detail so the dashboard can update tribe scores, votes, etc. live.
+        _emit_metric({
+            "type": "reward_detail",
+            "compliance_status": obs.compliance_status,
+            "buy_votes": int(obs.buy_votes or 0),
+            "panel_votes": obs.panel_votes or {},
+            "tribe_scores": obs.tribe_scores or {},
+            "reward_components": obs.reward_components or {},
+            "reward": self.reward,
+        })
         return json.dumps(
             {
                 "compliance_status": obs.compliance_status,
@@ -195,7 +208,90 @@ class NeuroPitchRolloutEnv:
         )
 
 
-def _make_neuropitch_reward(environment_url: str):
+def _score_single_rollout(
+    environment_url: str,
+    raw_completion,
+    product_brief: str,
+    competitor_ad: str,
+    rollout_idx: int = 0,
+    log_file: "io.TextIOWrapper | None" = None,
+    max_retries: int = 6,
+) -> float:
+    """Score one rollout, retrying on transient server errors (CAPACITY_REACHED, closed WS)."""
+    text = _completion_to_str(raw_completion)
+    text = _parse_pitch_text(text)
+    if not text:
+        _log_completion(log_file, rollout_idx, product_brief, competitor_ad, "", -1.0, {})
+        return -1.0
+
+    for attempt in range(max_retries):
+        try:
+            with NeuroPitchRolloutEnv(base_url=environment_url) as env:
+                env.reset(product_brief=product_brief, competitor_ad=competitor_ad)
+                env.submit_pitch(text)
+                reward = float(env.reward)
+            _log_completion(log_file, rollout_idx, product_brief, competitor_ad, text, reward, {})
+            return reward
+        except Exception as exc:
+            err_str = str(exc)
+            is_transient = (
+                "CAPACITY_REACHED" in err_str
+                or "ConnectionClosedOK" in err_str
+                or "ConnectionClosedError" in err_str
+                or isinstance(exc, TimeoutError)
+            )
+            if is_transient and attempt < max_retries - 1:
+                wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                logger.warning(
+                    "Transient env error (attempt %d/%d, retrying in %.1fs): %s",
+                    attempt + 1, max_retries, wait, exc,
+                )
+                time.sleep(wait)
+            else:
+                logger.exception("NeuroPitch env scoring failed; assigning penalty")
+                _log_completion(log_file, rollout_idx, product_brief, competitor_ad, text, -2.0, {"error": err_str[:200]})
+                return -2.0
+    return -2.0
+
+
+def _log_completion(
+    log_file: "io.TextIOWrapper | None",
+    rollout_idx: int,
+    product_brief: str,
+    competitor_ad: str,
+    text: str,
+    reward: float,
+    extras: dict,
+) -> None:
+    """Write one completion record to the JSONL log and emit it as a dashboard metric."""
+    record = {
+        "rollout": rollout_idx,
+        "product_brief": product_brief,
+        "competitor_ad": competitor_ad,
+        "generated_pitch": text,
+        "reward": reward,
+        **extras,
+    }
+    if log_file is not None:
+        try:
+            log_file.write(json.dumps(record) + "\n")
+            log_file.flush()
+        except Exception:
+            pass
+    # Stream a truncated version to the live dashboard
+    _emit_metric({
+        "type": "generation",
+        "rollout": rollout_idx,
+        "product_brief": product_brief[:120],
+        "generated_pitch": text[:400],
+        "reward": reward,
+    })
+
+
+def _make_neuropitch_reward(
+    environment_url: str,
+    log_file: "io.TextIOWrapper | None" = None,
+):
     """
     TRL 0.22.x `reward_func` signature:
     (prompts, completions, completion_ids=None, **kwargs) -> list[float]
@@ -203,6 +299,7 @@ def _make_neuropitch_reward(environment_url: str):
     Per-row `product_brief` and `competitor_ad` (from the dataset) must match the server reset kwargs
     so the scored episode matches the prompt the model was trained on.
     """
+    _call_count = [0]  # mutable counter shared across reward_func calls
 
     def reward_func(
         prompts,
@@ -224,21 +321,11 @@ def _make_neuropitch_reward(environment_url: str):
         for idx, raw in enumerate(completions):
             b = b_list[idx] if idx < len(b_list) else b_list[-1]
             a = a_list[idx] if idx < len(a_list) else a_list[-1]
-            try:
-                # Context manager opens WebSocket, keeps it alive for reset→step,
-                # then closes cleanly on exit — no manual close() needed.
-                with NeuroPitchRolloutEnv(base_url=environment_url) as env:
-                    text = _completion_to_str(raw)
-                    text = _parse_pitch_text(text)
-                    env.reset(product_brief=b, competitor_ad=a)
-                    if not text:
-                        scores.append(-1.0)
-                        continue
-                    env.submit_pitch(text)
-                    scores.append(float(env.reward))
-            except Exception:
-                logger.exception("NeuroPitch env scoring failed; assigning penalty")
-                scores.append(-2.0)
+            rollout_idx = _call_count[0]
+            _call_count[0] += 1
+            scores.append(
+                _score_single_rollout(environment_url, raw, b, a, rollout_idx, log_file)
+            )
         return scores
 
     return reward_func
@@ -274,10 +361,11 @@ def parse_args() -> argparse.Namespace:
     # Effective batch = per_device * grad_accum * processes.
     # Must be divisible by num_generations.
     # Default: 1 * 4 * 1 = 4 generations/step.  4 % 4 == 0.
-    parser.add_argument("--num-generations", type=int, default=4,
-                        help="Rollouts per prompt. 4-8 recommended for GRPO variance reduction.")
+    parser.add_argument("--num-generations", type=int, default=2,
+                        help="Rollouts per prompt. 2 = fast (each step ~halved); 4-8 for more stable gradient.")
     parser.add_argument("--per-device-train-batch-size", type=int, default=1)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=2,
+                        help="Must satisfy (per_device * grad_accum * procs) %% num_generations == 0.")
     parser.add_argument("--learning-rate", type=float, default=5e-6)
     parser.add_argument("--warmup-ratio", type=float, default=0.1,
                         help="Fraction of steps used for linear LR warmup.")
@@ -304,6 +392,12 @@ def parse_args() -> argparse.Namespace:
         help="Enable vLLM backend if installed.",
     )
     parser.add_argument("--push-to-hub", action="store_true")
+    parser.add_argument(
+        "--hub-model-id",
+        default="",
+        help="HF Hub repo to push to, e.g. 'your-user/neuropitch-grpo'. "
+             "Requires HF_TOKEN env var. Ignored if --push-to-hub is not set.",
+    )
     parser.add_argument("--report-to", default="none")
     return parser.parse_args()
 
@@ -322,9 +416,23 @@ def _effective_batch(
     return per_device * world_size * grad_accum
 
 
+def _hf_login() -> None:
+    """Login to Hugging Face Hub using HF_TOKEN if present in the environment."""
+    token = os.environ.get("HF_TOKEN", "").strip()
+    if not token:
+        return
+    try:
+        from huggingface_hub import login
+        login(token=token, add_to_git_credential=False)
+        logger.info("Logged in to Hugging Face Hub.")
+    except Exception as exc:
+        logger.warning("HF Hub login failed (%s); push-to-hub will likely fail.", exc)
+
+
 def main() -> None:
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+    _hf_login()
 
     # TRL: effective batch must be divisible by num_generations
     eff = _effective_batch(
@@ -428,6 +536,22 @@ def main() -> None:
         if processing_class.pad_token is None:
             processing_class.pad_token = processing_class.eos_token
 
+    # Resolve hub_model_id: explicit arg > HF_USERNAME/output-dir-basename > None
+    hub_model_id = ""
+    if args.push_to_hub:
+        hub_model_id = args.hub_model_id.strip()
+        if not hub_model_id:
+            hf_user = os.environ.get("HF_USERNAME", "").strip()
+            repo_name = os.path.basename(args.output_dir.rstrip("/"))
+            if hf_user:
+                hub_model_id = f"{hf_user}/{repo_name}"
+                logger.info("hub_model_id auto-derived: %s", hub_model_id)
+            else:
+                logger.warning(
+                    "push_to_hub=True but neither --hub-model-id nor HF_USERNAME is set; "
+                    "TRL will attempt to infer the repo from the logged-in user."
+                )
+
     config_kwargs: dict = dict(
         output_dir=args.output_dir,
         learning_rate=args.learning_rate,
@@ -447,6 +571,7 @@ def main() -> None:
         save_total_limit=3,
         report_to=args.report_to,
         push_to_hub=args.push_to_hub,
+        hub_model_id=hub_model_id or None,
         remove_unused_columns=False,
     )
     if use_vllm:
@@ -458,19 +583,38 @@ def main() -> None:
 
     train_args = GRPOConfig(**config_kwargs)
 
+    completions_log_path = os.path.join(args.output_dir, "completions.jsonl")
+    completions_log = open(completions_log_path, "a", encoding="utf-8")  # noqa: SIM115
+    logger.info("Logging all LLM completions to %s", completions_log_path)
+
     trainer = GRPOTrainer(
         model=model,
         processing_class=processing_class,
-        reward_funcs=_make_neuropitch_reward(args.environment_url),
+        reward_funcs=_make_neuropitch_reward(args.environment_url, log_file=completions_log),
         train_dataset=dataset,
         args=train_args,
         callbacks=[MetricEmitterCallback()],
     )
-    _emit_metric({"type": "start", "model": args.model_name, "max_steps": args.max_steps})
+    _emit_metric({
+        "type": "start",
+        "model": args.model_name,
+        "max_steps": args.max_steps,
+        "completions_log": completions_log_path,
+    })
     trainer.train()
+    completions_log.close()
     trainer.save_model(args.output_dir)
+    _emit_metric({"type": "saved", "output_dir": args.output_dir})
     if args.push_to_hub:
-        trainer.push_to_hub()
+        _emit_metric({"type": "pushing", "hub_model_id": hub_model_id or args.output_dir})
+        try:
+            trainer.push_to_hub()
+            repo_url = f"https://huggingface.co/{hub_model_id}" if hub_model_id else args.output_dir
+            _emit_metric({"type": "pushed", "hub_model_id": hub_model_id, "url": repo_url})
+            logger.info("Model pushed to Hub: %s", repo_url)
+        except Exception as exc:
+            logger.exception("push_to_hub failed: %s", exc)
+            _emit_metric({"type": "push_failed", "error": str(exc)})
 
 
 if __name__ == "__main__":

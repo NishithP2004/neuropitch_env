@@ -61,9 +61,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 # - gcc/build-essential: Triton JIT-compiles a small C file (driver.c) on first
 #   CUDA kernel invocation; without a C compiler Triton raises
 #   "Failed to find C compiler" even when only running inference.
+# - ffmpeg: required by whisperx (and pyannote.audio) to decode the reference.wav
+#   used by TRIBE v2 for the audio anchor; without it whisperx raises FileNotFoundError.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        curl zstd ca-certificates gcc build-essential && \
+        curl zstd ca-certificates gcc build-essential ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Ollama
